@@ -124,7 +124,8 @@ func (s *Service) Start(ctx context.Context) {
 func (s *Service) createMemo(ctx context.Context, client *MemosClient, content string) (*v1pb.Memo, error) {
 	resp, err := client.MemoService.CreateMemo(ctx, connect.NewRequest(&v1pb.CreateMemoRequest{
 		Memo: &v1pb.Memo{
-			Content: content,
+			Content:    content,
+			Visibility: v1pb.Visibility_PUBLIC,
 		},
 	}))
 	if err != nil {
