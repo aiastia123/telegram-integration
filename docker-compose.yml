@@ -2,7 +2,7 @@ version: "3.8"
 
 services:
   memogram:
-    image: ghcr.io/usememos/telegram-integration:latest
+    image: ghcr.io/aiastia123/telegram-integration:latest
     container_name: memogram
     restart: unless-stopped
     volumes:
