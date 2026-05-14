@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -547,8 +548,8 @@ func (s *Service) searchHandler(ctx context.Context, b *bot.Bot, m *models.Updat
 				slog.Error("failed to extract memo UID", slog.Any("err", err))
 				tgMessage = fmt.Sprintf("<b>%s</b>\n<code>%s</code>", html.EscapeString(memo.Name), escapedContent)
 			} else {
-				memoLink := fmt.Sprintf("%s/memos/%s", baseURL, memoUID)
-				tgMessage = fmt.Sprintf("<a href=\"%s\">%s</a>\n<code>%s</code>", memoLink, memo.Name, escapedContent)
+				memoLink := fmt.Sprintf("%s/memos/%s", baseURL, url.PathEscape(memoUID))
+				tgMessage = fmt.Sprintf("<a href=\"%s\">%s</a>\n<code>%s</code>", memoLink, html.EscapeString(memo.Name), escapedContent)
 			}
 			b.SendMessage(ctx, &bot.SendMessageParams{
 				ChatID:    m.Message.Chat.ID,
