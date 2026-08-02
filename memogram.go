@@ -134,7 +134,28 @@ func (s *Service) createMemo(ctx context.Context, client *MemosClient, content s
 		slog.Error("failed to create memo", slog.Any("err", err))
 		return nil, fmt.Errorf("create memo: %w", err)
 	}
-	return resp.Msg, nil
+	memo := resp.Msg
+	// Some Memos instances ignore the visibility set in CreateMemo and fall
+	// back to the server default (often PRIVATE). Force PUBLIC via UpdateMemo
+	// when the created memo is not already public, so new memos are always
+	// saved as PUBLIC by default.
+	if memo != nil && memo.Visibility != v1pb.Visibility_PUBLIC {
+		updated, err := client.MemoService.UpdateMemo(ctx, connect.NewRequest(&v1pb.UpdateMemoRequest{
+			Memo: &v1pb.Memo{
+				Name:       memo.Name,
+				Visibility: v1pb.Visibility_PUBLIC,
+			},
+			UpdateMask: &fieldmaskpb.FieldMask{
+				Paths: []string{"visibility"},
+			},
+		}))
+		if err != nil {
+			slog.Warn("failed to force PUBLIC visibility, keeping server default", slog.Any("err", err))
+		} else {
+			memo = updated.Msg
+		}
+	}
+	return memo, nil
 }
 
 func (s *Service) handleMemoCreation(ctx context.Context, client *MemosClient, m *models.Update, content string) (*v1pb.Memo, error) {
@@ -300,14 +321,14 @@ func (s *Service) handler(ctx context.Context, b *bot.Bot, m *models.Update) {
 		return
 	}
 
-	baseURL := normalizeBaseURL(s.config.ServerAddr)
-	if s.instanceProfile != nil && s.instanceProfile.InstanceUrl != "" {
-		baseURL = normalizeBaseURL(s.instanceProfile.InstanceUrl)
-	}
+	baseURL := s.resolveBaseURL()
 	b.SendMessage(ctx, &bot.SendMessageParams{
-		ChatID:              message.Chat.ID,
-		Text:                fmt.Sprintf("Content saved as %s\n[%s](%s/memos/%s)", v1pb.Visibility_name[int32(memo.Visibility)], memo.Name, baseURL, memoUID),
-		ParseMode:           models.ParseModeMarkdown,
+		ChatID: message.Chat.ID,
+		Text: fmt.Sprintf("Content saved as %s\n%s %s",
+			v1pb.Visibility_name[int32(memo.Visibility)],
+			memoLinkHTML(baseURL, memoUID),
+			html.EscapeString(memo.Name)),
+		ParseMode:           models.ParseModeHTML,
 		DisableNotification: true,
 		ReplyParameters: &models.ReplyParameters{
 			MessageID: message.ID,
@@ -456,15 +477,16 @@ func (s *Service) callbackQueryHandler(ctx context.Context, b *bot.Bot, update *
 		})
 		return
 	}
-	baseURL := normalizeBaseURL(s.config.ServerAddr)
-	if s.instanceProfile != nil && s.instanceProfile.InstanceUrl != "" {
-		baseURL = normalizeBaseURL(s.instanceProfile.InstanceUrl)
-	}
+	baseURL := s.resolveBaseURL()
 	b.EditMessageText(ctx, &bot.EditMessageTextParams{
-		ChatID:      update.CallbackQuery.Message.Message.Chat.ID,
-		MessageID:   update.CallbackQuery.Message.Message.ID,
-		Text:        fmt.Sprintf("Memo updated as %s with [%s](%s/memos/%s) %s", v1pb.Visibility_name[int32(memo.Visibility)], memo.Name, baseURL, memoUID, pinnedMarker),
-		ParseMode:   models.ParseModeMarkdown,
+		ChatID:    update.CallbackQuery.Message.Message.Chat.ID,
+		MessageID: update.CallbackQuery.Message.Message.ID,
+		Text: fmt.Sprintf("Memo updated as %s with %s %s %s",
+			v1pb.Visibility_name[int32(memo.Visibility)],
+			memoLinkHTML(baseURL, memoUID),
+			html.EscapeString(memo.Name),
+			pinnedMarker),
+		ParseMode:   models.ParseModeHTML,
 		ReplyMarkup: s.keyboard(memo),
 	})
 
@@ -530,10 +552,7 @@ func (s *Service) searchHandler(ctx context.Context, b *bot.Bot, m *models.Updat
 
 	memos := results.Msg.GetMemos()
 
-	baseURL := normalizeBaseURL(s.config.ServerAddr)
-	if s.instanceProfile != nil && s.instanceProfile.InstanceUrl != "" {
-		baseURL = normalizeBaseURL(s.instanceProfile.InstanceUrl)
-	}
+	baseURL := s.resolveBaseURL()
 	if len(memos) == 0 {
 		b.SendMessage(ctx, &bot.SendMessageParams{
 			ChatID: m.Message.Chat.ID,
@@ -548,8 +567,7 @@ func (s *Service) searchHandler(ctx context.Context, b *bot.Bot, m *models.Updat
 				slog.Error("failed to extract memo UID", slog.Any("err", err))
 				tgMessage = fmt.Sprintf("<b>%s</b>\n<code>%s</code>", html.EscapeString(memo.Name), escapedContent)
 			} else {
-				memoLink := fmt.Sprintf("%s/memos/%s", baseURL, url.PathEscape(memoUID))
-				tgMessage = fmt.Sprintf("<a href=\"%s\">%s</a>\n<code>%s</code>", memoLink, html.EscapeString(memo.Name), escapedContent)
+				tgMessage = fmt.Sprintf("%s <b>%s</b>\n<code>%s</code>", memoLinkHTML(baseURL, memoUID), html.EscapeString(memo.Name), escapedContent)
 			}
 			b.SendMessage(ctx, &bot.SendMessageParams{
 				ChatID:    m.Message.Chat.ID,
@@ -646,6 +664,30 @@ func (s *Service) sendError(b *bot.Bot, chatID int64, err error) {
 		ChatID: chatID,
 		Text:   fmt.Sprintf("Error: %s", err.Error()),
 	})
+}
+
+// memoLink returns the canonical web link for a memo, with the UID path-escaped
+// so that values containing URL-unsafe characters render as valid clickable links
+// in Telegram (HTML parse mode).
+func memoLink(baseURL, memoUID string) string {
+	return fmt.Sprintf("%s/memos/%s", baseURL, url.PathEscape(memoUID))
+}
+
+// memoLinkHTML returns a Telegram HTML anchor for the memo. HTML parse mode is
+// used because MarkdownV1 link parsing silently downgrades [text](url) to plain
+// text when the URL fails validation, which previously made the memo UID show up
+// as unclickable plain text (e.g. "memos/MeyoUUzoNnpjWq2ZExyDb4").
+func memoLinkHTML(baseURL, memoUID string) string {
+	return fmt.Sprintf("<a href=\"%s\">%s</a>", html.EscapeString(memoLink(baseURL, memoUID)), html.EscapeString(memoUID))
+}
+
+// resolveBaseURL picks the instance URL from the workspace profile when present,
+// otherwise falls back to the configured server address.
+func (s *Service) resolveBaseURL() string {
+	if s.instanceProfile != nil && s.instanceProfile.InstanceUrl != "" {
+		return normalizeBaseURL(s.instanceProfile.InstanceUrl)
+	}
+	return normalizeBaseURL(s.config.ServerAddr)
 }
 
 func normalizeBaseURL(raw string) string {
