@@ -311,8 +311,7 @@ func (s *Service) handler(ctx context.Context, b *bot.Bot, m *models.Update) {
 		s.processFileMessage(ctx, authClient, b, m, photo.FileID, memo)
 	}
 
-	memoUID, err := ExtractMemoUIDFromName(memo.Name)
-	if err != nil {
+	if _, err := ExtractMemoUIDFromName(memo.Name); err != nil {
 		slog.Error("failed to extract memo UID", slog.Any("err", err))
 		b.SendMessage(ctx, &bot.SendMessageParams{
 			ChatID: message.Chat.ID,
@@ -324,10 +323,9 @@ func (s *Service) handler(ctx context.Context, b *bot.Bot, m *models.Update) {
 	baseURL := s.resolveBaseURL()
 	b.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID: message.Chat.ID,
-		Text: fmt.Sprintf("Content saved as %s\n%s %s",
-			v1pb.Visibility_name[int32(memo.Visibility)],
-			memoLinkHTML(baseURL, memoUID),
-			html.EscapeString(memo.Name)),
+		Text: fmt.Sprintf("✅ 已保存 · %s\n🌐 %s",
+			visibilityLabel(memo.Visibility),
+			memoNameHTML(baseURL, memo.Name)),
 		ParseMode:           models.ParseModeHTML,
 		DisableNotification: true,
 		ReplyParameters: &models.ReplyParameters{
@@ -468,8 +466,7 @@ func (s *Service) callbackQueryHandler(ctx context.Context, b *bot.Bot, update *
 		pinnedMarker = ""
 	}
 
-	memoUID, err := ExtractMemoUIDFromName(memo.Name)
-	if err != nil {
+	if _, err := ExtractMemoUIDFromName(memo.Name); err != nil {
 		slog.Error("failed to extract memo UID", slog.Any("err", err))
 		b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{
 			CallbackQueryID: update.CallbackQuery.ID,
@@ -481,11 +478,10 @@ func (s *Service) callbackQueryHandler(ctx context.Context, b *bot.Bot, update *
 	b.EditMessageText(ctx, &bot.EditMessageTextParams{
 		ChatID:    update.CallbackQuery.Message.Message.Chat.ID,
 		MessageID: update.CallbackQuery.Message.Message.ID,
-		Text: fmt.Sprintf("Memo updated as %s with %s %s %s",
-			v1pb.Visibility_name[int32(memo.Visibility)],
-			memoLinkHTML(baseURL, memoUID),
-			html.EscapeString(memo.Name),
-			pinnedMarker),
+		Text: fmt.Sprintf("✅ 已更新 · %s %s\n🌐 %s",
+			visibilityLabel(memo.Visibility),
+			pinnedMarker,
+			memoNameHTML(baseURL, memo.Name)),
 		ParseMode:   models.ParseModeHTML,
 		ReplyMarkup: s.keyboard(memo),
 	})
@@ -560,15 +556,7 @@ func (s *Service) searchHandler(ctx context.Context, b *bot.Bot, m *models.Updat
 		})
 	} else {
 		for _, memo := range results.Msg.GetMemos() {
-			memoUID, err := ExtractMemoUIDFromName(memo.Name)
-			escapedContent := html.EscapeString(memo.Content)
-			var tgMessage string
-			if err != nil {
-				slog.Error("failed to extract memo UID", slog.Any("err", err))
-				tgMessage = fmt.Sprintf("<b>%s</b>\n<code>%s</code>", html.EscapeString(memo.Name), escapedContent)
-			} else {
-				tgMessage = fmt.Sprintf("%s <b>%s</b>\n<code>%s</code>", memoLinkHTML(baseURL, memoUID), html.EscapeString(memo.Name), escapedContent)
-			}
+			tgMessage := fmt.Sprintf("🌐 %s\n<code>%s</code>", memoNameHTML(baseURL, memo.Name), html.EscapeString(memo.Content))
 			b.SendMessage(ctx, &bot.SendMessageParams{
 				ChatID:    m.Message.Chat.ID,
 				Text:      tgMessage,
@@ -673,12 +661,29 @@ func memoLink(baseURL, memoUID string) string {
 	return fmt.Sprintf("%s/memos/%s", baseURL, url.PathEscape(memoUID))
 }
 
-// memoLinkHTML returns a Telegram HTML anchor for the memo. HTML parse mode is
-// used because MarkdownV1 link parsing silently downgrades [text](url) to plain
-// text when the URL fails validation, which previously made the memo UID show up
-// as unclickable plain text (e.g. "memos/MeyoUUzoNnpjWq2ZExyDb4").
-func memoLinkHTML(baseURL, memoUID string) string {
-	return fmt.Sprintf("<a href=\"%s\">%s</a>", html.EscapeString(memoLink(baseURL, memoUID)), html.EscapeString(memoUID))
+// memoNameHTML returns a Telegram HTML anchor whose visible text is the full
+// resource name (e.g. "memos/<uid>") and points to the memo's web page. This
+// avoids the duplicated "uid memos/uid" that appeared when the uid was shown as
+// plain text alongside the link, and keeps everything in HTML parse mode since
+// MarkdownV1 silently downgrades [text](url) to plain text on URL validation
+// failure.
+func memoNameHTML(baseURL, memoName string) string {
+	return fmt.Sprintf("<a href=\"%s\">%s</a>", html.EscapeString(memoLink(baseURL, memoName)), html.EscapeString(memoName))
+}
+
+// visibilityLabel turns a proto visibility enum into a short Chinese label for
+// bot replies. Falls back to the enum's own name for unknown values.
+func visibilityLabel(v v1pb.Visibility) string {
+	switch v {
+	case v1pb.Visibility_PUBLIC:
+		return "公开"
+	case v1pb.Visibility_PROTECTED:
+		return "受保护"
+	case v1pb.Visibility_PRIVATE:
+		return "私密"
+	default:
+		return v1pb.Visibility_name[int32(v)]
+	}
 }
 
 // resolveBaseURL picks the instance URL from the workspace profile when present,
